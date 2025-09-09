@@ -1,11 +1,15 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_staggered_animations/flutter_staggered_animations.dart';
+import 'package:provider/provider.dart';
 import '../main.dart';
 import '../models/employee.dart';
+import '../providers/theme_provider.dart';
 import 'employee_setup_page.dart';
 import 'employee_info_page.dart';
 import 'schedule_page.dart';
 import 'time_tracking_page.dart';
 import 'login_page.dart';
+import 'reports_page.dart'; // ✅ Added import
 
 class DashboardPage extends StatefulWidget {
   const DashboardPage({super.key});
@@ -111,76 +115,109 @@ class _DashboardPageState extends State<DashboardPage> {
       );
     }
 
+    final themeProvider = Provider.of<ThemeProvider>(context);
+    final screenWidth = MediaQuery.of(context).size.width;
+    final crossAxisCount = screenWidth > 600 ? 3 : 2;
+
     return Scaffold(
       appBar: AppBar(
         title: Text('Welcome, ${_employee!.firstName}'),
+        elevation: 2,
         actions: [
+          IconButton(
+            icon: Icon(themeProvider.isDarkMode ? Icons.light_mode : Icons.dark_mode),
+            onPressed: () => themeProvider.toggleTheme(),
+            tooltip: 'Toggle Theme',
+          ),
           IconButton(
             icon: const Icon(Icons.logout),
             onPressed: _signOut,
+            tooltip: 'Sign Out',
           ),
         ],
       ),
-      body: Padding(
-        padding: const EdgeInsets.all(16.0),
-        child: GridView.count(
-          crossAxisCount: 2,
-          crossAxisSpacing: 16,
-          mainAxisSpacing: 16,
-          children: [
-            _DashboardCard(
-              title: 'Employee Info',
-              icon: Icons.person,
-              color: Colors.blue,
-              onTap: () {
-                Navigator.of(context).push(
-                  MaterialPageRoute(
-                    builder: (context) =>
-                        EmployeeInfoPage(employee: _employee!),
+      body: Container(
+        decoration: BoxDecoration(
+          gradient: LinearGradient(
+            begin: Alignment.topCenter,
+            end: Alignment.bottomCenter,
+            colors: [
+              Theme.of(context).colorScheme.primary.withOpacity(0.05),
+              Theme.of(context).colorScheme.surface,
+            ],
+          ),
+        ),
+        child: Padding(
+          padding: const EdgeInsets.all(16.0),
+          child: AnimationLimiter(
+            child: GridView.count(
+              crossAxisCount: crossAxisCount,
+              crossAxisSpacing: 16,
+              mainAxisSpacing: 16,
+              children: AnimationConfiguration.toStaggeredList(
+                duration: const Duration(milliseconds: 375),
+                childAnimationBuilder: (widget) => SlideAnimation(
+                  horizontalOffset: 50.0,
+                  child: FadeInAnimation(
+                    child: widget,
                   ),
-                );
-              },
-            ),
-            _DashboardCard(
-              title: 'Schedule',
-              icon: Icons.calendar_today,
-              color: Colors.green,
-              onTap: () {
-                Navigator.of(context).push(
-                  MaterialPageRoute(
-                    builder: (context) => SchedulePage(employee: _employee!),
+                ),
+                children: [
+                  _DashboardCard(
+                    title: 'Employee Info',
+                    icon: Icons.person,
+                    color: Colors.blue,
+                    onTap: () {
+                      Navigator.of(context).push(
+                        MaterialPageRoute(
+                          builder: (context) =>
+                              EmployeeInfoPage(employee: _employee!),
+                        ),
+                      );
+                    },
                   ),
-                );
-              },
-            ),
-            _DashboardCard(
-              title: 'Time Tracking',
-              icon: Icons.access_time,
-              color: Colors.orange,
-              onTap: () {
-                Navigator.of(context).push(
-                  MaterialPageRoute(
-                    builder: (context) =>
-                        TimeTrackingPage(employee: _employee!),
+                  _DashboardCard(
+                    title: 'Schedule',
+                    icon: Icons.calendar_today,
+                    color: Colors.green,
+                    onTap: () {
+                      Navigator.of(context).push(
+                        MaterialPageRoute(
+                          builder: (context) => SchedulePage(employee: _employee!),
+                        ),
+                      );
+                    },
                   ),
-                );
-              },
-            ),
-            _DashboardCard(
-              title: 'Reports',
-              icon: Icons.analytics,
-              color: Colors.purple,
-              onTap: () {
-                ScaffoldMessenger.of(context).showSnackBar(
-                  SnackBar(
-                    content: const Text('Reports feature coming soon!'),
-                    backgroundColor: Theme.of(context).colorScheme.primary,
-                    behavior: SnackBarBehavior.floating,
+                  _DashboardCard(
+                    title: 'Time Tracking',
+                    icon: Icons.access_time,
+                    color: Colors.orange,
+                    onTap: () {
+                      Navigator.of(context).push(
+                        MaterialPageRoute(
+                          builder: (context) =>
+                              TimeTrackingPage(employee: _employee!),
+                        ),
+                      );
+                    },
                   ),
-                );
-              },
+                  _DashboardCard(
+                    title: 'Reports',
+                    icon: Icons.analytics,
+                    color: Colors.purple,
+                    onTap: () {
+                      Navigator.of(context).push(
+                        MaterialPageRoute(
+                          builder: (context) => ReportsPage(
+                              employee: _employee!), // ✅ Navigate to reports
+                        ),
+                      );
+                    },
+                  ),
+                ],
+              ),
             ),
-          ],
+          ),
         ),
       ),
     );

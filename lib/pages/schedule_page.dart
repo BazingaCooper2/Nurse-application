@@ -3,6 +3,7 @@ import 'package:intl/intl.dart';
 import '../main.dart';
 import '../models/employee.dart';
 import '../models/schedule.dart';
+import 'schedule_details_page.dart';
 
 class SchedulePage extends StatefulWidget {
   final Employee employee;
@@ -15,8 +16,12 @@ class SchedulePage extends StatefulWidget {
 
 class _SchedulePageState extends State<SchedulePage> {
   List<Schedule> _schedules = [];
+  List<Schedule> _today = [];
+  List<Schedule> _upcoming = [];
+  List<Schedule> _past = [];
+  List<Schedule> _rescheduled = [];
+
   bool _isLoading = true;
-  final DateTime _selectedDate = DateTime.now();
 
   @override
   void initState() {
@@ -54,8 +59,31 @@ class _SchedulePageState extends State<SchedulePage> {
           .order('scheduled_date')
           .order('scheduled_start_time');
 
+      final schedules =
+          response.map<Schedule>((json) => Schedule.fromJson(json)).toList();
+
+      final now = DateTime.now();
+
       setState(() {
-        _schedules = response.map((json) => Schedule.fromJson(json)).toList();
+        _schedules = schedules;
+
+        _today = schedules.where((s) {
+          return s.scheduledDate.year == now.year &&
+              s.scheduledDate.month == now.month &&
+              s.scheduledDate.day == now.day;
+        }).toList();
+
+        _upcoming =
+            schedules.where((s) => s.scheduledDate.isAfter(now)).toList();
+
+        _past = schedules
+            .where(
+                (s) => s.scheduledDate.isBefore(now) && s.status == 'completed')
+            .toList();
+
+        _rescheduled =
+            schedules.where((s) => s.status == 'rescheduled').toList();
+
         _isLoading = false;
       });
     } catch (error) {
@@ -139,31 +167,88 @@ class _SchedulePageState extends State<SchedulePage> {
       ),
       body: _isLoading
           ? const Center(child: CircularProgressIndicator())
-          : _schedules.isEmpty
-              ? const Center(
-                  child: Column(
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    children: [
-                      Icon(Icons.calendar_today, size: 64, color: Colors.grey),
-                      SizedBox(height: 16),
-                      Text(
-                        'No schedules found',
-                        style: TextStyle(fontSize: 18, color: Colors.grey),
+          : SingleChildScrollView(
+              padding: const EdgeInsets.all(16),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  if (_today.isNotEmpty)
+                    _Section(
+                      title: "Today's Appointments",
+                      schedules: _today,
+                      onReschedule: _rescheduleAppointment,
+                    ),
+                  if (_upcoming.isNotEmpty)
+                    _Section(
+                      title: "Upcoming Appointments",
+                      schedules: _upcoming,
+                      onReschedule: _rescheduleAppointment,
+                    ),
+                  if (_rescheduled.isNotEmpty)
+                    _Section(
+                      title: "Rescheduled",
+                      schedules: _rescheduled,
+                      onReschedule: _rescheduleAppointment,
+                    ),
+                  if (_past.isNotEmpty)
+                    _Section(
+                      title: "Past Appointments",
+                      schedules: _past,
+                      onReschedule: _rescheduleAppointment,
+                    ),
+                  if (_today.isEmpty &&
+                      _upcoming.isEmpty &&
+                      _past.isEmpty &&
+                      _rescheduled.isEmpty)
+                    const Center(
+                      child: Column(
+                        children: [
+                          Icon(Icons.calendar_today,
+                              size: 64, color: Colors.grey),
+                          SizedBox(height: 16),
+                          Text(
+                            'No schedules found',
+                            style: TextStyle(fontSize: 18, color: Colors.grey),
+                          ),
+                        ],
                       ),
-                    ],
-                  ),
-                )
-              : ListView.builder(
-                  padding: const EdgeInsets.all(16),
-                  itemCount: _schedules.length,
-                  itemBuilder: (context, index) {
-                    final schedule = _schedules[index];
-                    return _ScheduleCard(
-                      schedule: schedule,
-                      onReschedule: () => _rescheduleAppointment(schedule),
-                    );
-                  },
-                ),
+                    ),
+                ],
+              ),
+            ),
+    );
+  }
+}
+
+class _Section extends StatelessWidget {
+  final String title;
+  final List<Schedule> schedules;
+  final Function(Schedule) onReschedule;
+
+  const _Section({
+    required this.title,
+    required this.schedules,
+    required this.onReschedule,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          title,
+          style: Theme.of(context).textTheme.titleLarge?.copyWith(
+                fontWeight: FontWeight.bold,
+              ),
+        ),
+        const SizedBox(height: 8),
+        ...schedules.map((s) => _ScheduleCard(
+              schedule: s,
+              onReschedule: () => onReschedule(s),
+            )),
+        const SizedBox(height: 24),
+      ],
     );
   }
 }
@@ -309,9 +394,10 @@ class _ScheduleCard extends StatelessWidget {
                     Expanded(
                       child: Text(
                         schedule.patient!.medicalNotes!,
-                        style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                              color: Colors.blue[800],
-                            ),
+                        style: Theme.of(context)
+                            .textTheme
+                            .bodySmall
+                            ?.copyWith(color: Colors.blue[800]),
                       ),
                     ),
                   ],
@@ -334,7 +420,12 @@ class _ScheduleCard extends StatelessWidget {
                 Expanded(
                   child: ElevatedButton.icon(
                     onPressed: () {
-                      // Navigate to time tracking or patient details
+                      Navigator.of(context).push(
+                        MaterialPageRoute(
+                          builder: (context) =>
+                              ScheduleDetailsPage(schedule: schedule),
+                        ),
+                      );
                     },
                     icon: const Icon(Icons.info),
                     label: const Text('View Details'),

@@ -1,7 +1,14 @@
+import 'dart:async';
+
+import 'package:flutter/foundation.dart'
+    show defaultTargetPlatform, kIsWeb, TargetPlatform;
 import 'package:flutter/material.dart';
-import 'package:geolocator/geolocator.dart';
 import 'package:geocoding/geocoding.dart';
+import 'package:geolocator/geolocator.dart';
+import 'package:google_maps_flutter/google_maps_flutter.dart';
 import 'package:intl/intl.dart';
+import 'package:flutter_local_notifications/flutter_local_notifications.dart';
+
 import '../main.dart';
 import '../models/employee.dart';
 import '../models/schedule.dart';
@@ -20,14 +27,30 @@ class _TimeTrackingPageState extends State<TimeTrackingPage> {
   List<Schedule> _todaySchedules = [];
   List<TimeLog> _timeLogs = [];
   bool _isLoading = true;
+
   Position? _currentPosition;
   String? _currentAddress;
+
+  StreamSubscription<Position>? _posSub;
+  StreamSubscription<ServiceStatus>? _svcSub;
+  bool _locationServiceOn = true;
+
+  GoogleMapController? _mapController;
+
+  Set<Marker> _markers = {};
 
   @override
   void initState() {
     super.initState();
     _loadData();
-    _getCurrentLocation();
+    _ensurePermissionThenTrack();
+  }
+
+  @override
+  void dispose() {
+    _posSub?.cancel();
+    _svcSub?.cancel();
+    super.dispose();
   }
 
   Future<void> _loadData() async {
@@ -38,7 +61,6 @@ class _TimeTrackingPageState extends State<TimeTrackingPage> {
 
       final today = DateFormat('yyyy-MM-dd').format(DateTime.now());
 
-      // Load today's schedules
       final schedulesResponse = await supabase
           .from('schedules')
           .select('''
@@ -58,7 +80,6 @@ class _TimeTrackingPageState extends State<TimeTrackingPage> {
           .eq('scheduled_date', today)
           .order('scheduled_start_time');
 
-      // Load time logs
       final timeLogsResponse = await supabase
           .from('time_logs')
           .select()
@@ -74,79 +95,165 @@ class _TimeTrackingPageState extends State<TimeTrackingPage> {
         _isLoading = false;
       });
     } catch (error) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('Error loading data: $error'),
-            backgroundColor: Theme.of(context).colorScheme.error,
-            behavior: SnackBarBehavior.floating,
-          ),
-        );
-        setState(() {
-          _isLoading = false;
-        });
-      }
+      _showSnack('Error loading data: $error', isError: true);
+      setState(() => _isLoading = false);
     }
   }
 
-  Future<void> _getCurrentLocation() async {
+  Future<void> _showTurnOnLocationNotif() async {
+    const androidDetails = AndroidNotificationDetails(
+      'location_channel',
+      'Location Alerts',
+      importance: Importance.high,
+      priority: Priority.high,
+    );
+    const details = NotificationDetails(
+      android: androidDetails,
+      iOS: DarwinNotificationDetails(),
+    );
+
+    await localNotifs.show(
+      1001,
+      'Turn on Location',
+      'Live tracking is paused. Tap to open Location Settings.',
+      details,
+    );
+  }
+
+  void _promptTurnOnLocation() {
+    if (!mounted) return;
+    showDialog(
+      context: context,
+      builder: (_) => AlertDialog(
+        title: const Text('Turn on Location'),
+        content: const Text(
+            'Live tracking needs your device location. Please turn it on.'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Later'),
+          ),
+          ElevatedButton(
+            onPressed: () async {
+              Navigator.pop(context);
+              await Geolocator.openLocationSettings();
+            },
+            child: const Text('Open Settings'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _showSnack(String msg, {bool isError = false}) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(msg),
+        backgroundColor:
+            isError ? Colors.redAccent : Theme.of(context).colorScheme.primary,
+        behavior: SnackBarBehavior.floating,
+      ),
+    );
+  }
+
+  Future<void> _ensurePermissionThenTrack() async {
     try {
-      bool serviceEnabled = await Geolocator.isLocationServiceEnabled();
-      if (!serviceEnabled) {
-        throw Exception('Location services are disabled.');
+      if (kIsWeb) {
+        // Web only supports Position stream, no ServiceStatusStream
+        await _startPositionStream();
+        return;
       }
 
-      LocationPermission permission = await Geolocator.checkPermission();
+      final serviceEnabled = await Geolocator.isLocationServiceEnabled();
+      setState(() => _locationServiceOn = serviceEnabled);
+      if (!serviceEnabled) {
+        await _showTurnOnLocationNotif();
+        _promptTurnOnLocation();
+      }
+
+      var permission = await Geolocator.checkPermission();
       if (permission == LocationPermission.denied) {
         permission = await Geolocator.requestPermission();
-        if (permission == LocationPermission.denied) {
-          throw Exception('Location permissions are denied');
-        }
       }
-
       if (permission == LocationPermission.deniedForever) {
-        throw Exception('Location permissions are permanently denied');
+        _showSnack('Location permission permanently denied.', isError: true);
+        await Geolocator.openAppSettings();
+        return;
+      }
+      if (permission == LocationPermission.denied) {
+        _showSnack('Location permission denied.', isError: true);
+        return;
       }
 
-      final position = await Geolocator.getCurrentPosition();
-      final placemarks = await placemarkFromCoordinates(
-        position.latitude,
-        position.longitude,
-      );
-
-      setState(() {
-        _currentPosition = position;
-        if (placemarks.isNotEmpty) {
-          final placemark = placemarks.first;
-          _currentAddress =
-              '${placemark.street}, ${placemark.locality}, ${placemark.administrativeArea}';
-        }
-      });
-    } catch (error) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('Error getting location: $error'),
-            backgroundColor: Theme.of(context).colorScheme.error,
-            behavior: SnackBarBehavior.floating,
-          ),
-        );
+      await _svcSub?.cancel();
+      if (defaultTargetPlatform == TargetPlatform.android ||
+          defaultTargetPlatform == TargetPlatform.iOS) {
+        _svcSub = Geolocator.getServiceStatusStream().listen((status) async {
+          final on = status == ServiceStatus.enabled;
+          if (mounted) setState(() => _locationServiceOn = on);
+          if (!on) {
+            await _showTurnOnLocationNotif();
+            _promptTurnOnLocation();
+          } else {
+            await localNotifs.cancel(1001);
+          }
+        });
       }
+
+      await _startPositionStream();
+    } catch (e) {
+      _showSnack('Location error: $e', isError: true);
     }
+  }
+
+  Future<void> _startPositionStream() async {
+    await _posSub?.cancel();
+    _posSub = Geolocator.getPositionStream(
+      locationSettings: const LocationSettings(
+        accuracy: LocationAccuracy.best,
+        distanceFilter: 10,
+      ),
+    ).listen((pos) async {
+      _currentPosition = pos;
+      if (_currentAddress == null) {
+        final placemarks =
+            await placemarkFromCoordinates(pos.latitude, pos.longitude);
+        if (placemarks.isNotEmpty) {
+          final p = placemarks.first;
+          _currentAddress =
+              '${p.street}, ${p.locality}, ${p.administrativeArea}';
+        }
+      }
+      _updateMapLocation();
+      if (mounted) setState(() {});
+    }, onError: (e) => _showSnack('Location stream error: $e', isError: true));
+  }
+
+  void _updateMapLocation() {
+    if (_currentPosition == null || _mapController == null) return;
+
+    final newLatLng = LatLng(_currentPosition!.latitude, _currentPosition!.longitude);
+
+    _mapController!.animateCamera(CameraUpdate.newLatLng(newLatLng));
+
+    setState(() {
+      _markers = {
+        Marker(
+          markerId: const MarkerId('currentLocation'),
+          position: newLatLng,
+          infoWindow: const InfoWindow(title: 'Your Location'),
+          icon: BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueBlue),
+        ),
+      };
+    });
   }
 
   Future<void> _clockIn(Schedule schedule) async {
     if (_currentPosition == null) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: const Text('Please wait for location to be detected'),
-          backgroundColor: Theme.of(context).colorScheme.error,
-          behavior: SnackBarBehavior.floating,
-        ),
-      );
+      _showSnack('Please wait for location to be detected', isError: true);
       return;
     }
-
     try {
       await supabase.from('time_logs').insert({
         'employee_id': widget.employee.id,
@@ -156,48 +263,22 @@ class _TimeTrackingPageState extends State<TimeTrackingPage> {
         'clock_in_longitude': _currentPosition!.longitude,
         'clock_in_address': _currentAddress,
       });
-
-      // Update schedule status
       await supabase.from('schedules').update({
         'status': 'in_progress',
         'updated_at': DateTime.now().toIso8601String(),
       }).eq('id', schedule.id);
-
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: const Text('Clocked in successfully!'),
-            backgroundColor: Theme.of(context).colorScheme.primary,
-            behavior: SnackBarBehavior.floating,
-          ),
-        );
-        _loadData();
-      }
+      _showSnack('Clocked in successfully!');
+      _loadData();
     } catch (error) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('Error clocking in: $error'),
-            backgroundColor: Theme.of(context).colorScheme.error,
-            behavior: SnackBarBehavior.floating,
-          ),
-        );
-      }
+      _showSnack('Error clocking in: $error', isError: true);
     }
   }
 
   Future<void> _clockOut(TimeLog timeLog) async {
     if (_currentPosition == null) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: const Text('Please wait for location to be detected'),
-          backgroundColor: Theme.of(context).colorScheme.error,
-          behavior: SnackBarBehavior.floating,
-        ),
-      );
+      _showSnack('Please wait for location to be detected', isError: true);
       return;
     }
-
     try {
       final clockOutTime = DateTime.now();
       final clockInTime = timeLog.clockInTime!;
@@ -212,32 +293,15 @@ class _TimeTrackingPageState extends State<TimeTrackingPage> {
         'updated_at': DateTime.now().toIso8601String(),
       }).eq('id', timeLog.id);
 
-      // Update schedule status
       await supabase.from('schedules').update({
         'status': 'completed',
         'updated_at': DateTime.now().toIso8601String(),
       }).eq('id', timeLog.scheduleId);
 
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: const Text('Clocked out successfully!'),
-            backgroundColor: Theme.of(context).colorScheme.primary,
-            behavior: SnackBarBehavior.floating,
-          ),
-        );
-        _loadData();
-      }
+      _showSnack('Clocked out successfully!');
+      _loadData();
     } catch (error) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('Error clocking out: $error'),
-            backgroundColor: Theme.of(context).colorScheme.error,
-            behavior: SnackBarBehavior.floating,
-          ),
-        );
-      }
+      _showSnack('Error clocking out: $error', isError: true);
     }
   }
 
@@ -271,7 +335,7 @@ class _TimeTrackingPageState extends State<TimeTrackingPage> {
             icon: const Icon(Icons.refresh),
             onPressed: () {
               _loadData();
-              _getCurrentLocation();
+              _ensurePermissionThenTrack();
             },
           ),
         ],
@@ -283,10 +347,52 @@ class _TimeTrackingPageState extends State<TimeTrackingPage> {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
+                  if (!_locationServiceOn && !kIsWeb)
+                    Container(
+                      width: double.infinity,
+                      margin: const EdgeInsets.only(bottom: 12),
+                      padding: const EdgeInsets.all(12),
+                      decoration: BoxDecoration(
+                        color: Colors.red.withOpacity(0.08),
+                        borderRadius: BorderRadius.circular(8),
+                        border: Border.all(color: Colors.redAccent),
+                      ),
+                      child: Row(
+                        children: [
+                          const Icon(Icons.location_off,
+                              color: Colors.redAccent),
+                          const SizedBox(width: 8),
+                          const Expanded(
+                            child: Text(
+                                'Location is OFF. Turn it on for live tracking.'),
+                          ),
+                          TextButton(
+                            onPressed: () => Geolocator.openLocationSettings(),
+                            child: const Text('Turn on'),
+                          ),
+                        ],
+                      ),
+                    ),
                   _LocationCard(
                     currentPosition: _currentPosition,
                     currentAddress: _currentAddress,
                   ),
+                  const SizedBox(height: 16),
+                  if (_currentPosition != null)
+                    SizedBox(
+                      height: 300,
+                      child: GoogleMap(
+                        initialCameraPosition: CameraPosition(
+                          target: LatLng(
+                            _currentPosition!.latitude,
+                            _currentPosition!.longitude,
+                          ),
+                          zoom: 15,
+                        ),
+                        markers: _markers,
+                        onMapCreated: (controller) => _mapController = controller,
+                      ),
+                    ),
                   const SizedBox(height: 24),
                   Text(
                     'Today\'s Appointments',
@@ -297,18 +403,7 @@ class _TimeTrackingPageState extends State<TimeTrackingPage> {
                   const SizedBox(height: 16),
                   if (_todaySchedules.isEmpty)
                     const Center(
-                      child: Column(
-                        children: [
-                          Icon(Icons.calendar_today,
-                              size: 64, color: Colors.grey),
-                          SizedBox(height: 16),
-                          Text(
-                            'No appointments scheduled for today',
-                            style: TextStyle(fontSize: 16, color: Colors.grey),
-                          ),
-                        ],
-                      ),
-                    )
+                        child: Text('No appointments scheduled for today'))
                   else
                     ..._todaySchedules.map((schedule) {
                       final activeTimeLog = _getActiveTimeLog(schedule.id);
@@ -330,17 +425,11 @@ class _TimeTrackingPageState extends State<TimeTrackingPage> {
                   ),
                   const SizedBox(height: 16),
                   if (_timeLogs.isEmpty)
-                    const Center(
-                      child: Text(
-                        'No time logs found',
-                        style: TextStyle(fontSize: 16, color: Colors.grey),
-                      ),
-                    )
+                    const Center(child: Text('No time logs found'))
                   else
                     ..._timeLogs
                         .take(5)
-                        .map((timeLog) => _TimeLogCard(timeLog: timeLog))
-                        ,
+                        .map((timeLog) => _TimeLogCard(timeLog: timeLog)),
                 ],
               ),
             ),
@@ -367,10 +456,8 @@ class _LocationCard extends StatelessWidget {
           children: [
             Row(
               children: [
-                Icon(
-                  Icons.location_on,
-                  color: currentPosition != null ? Colors.green : Colors.red,
-                ),
+                Icon(Icons.location_on,
+                    color: currentPosition != null ? Colors.green : Colors.red),
                 const SizedBox(width: 8),
                 Text(
                   'Current Location',
@@ -382,23 +469,17 @@ class _LocationCard extends StatelessWidget {
             ),
             const SizedBox(height: 12),
             if (currentPosition != null) ...[
-              Text(
-                currentAddress ?? 'Address not available',
-                style: Theme.of(context).textTheme.bodyMedium,
-              ),
+              Text(currentAddress ?? 'Address not available'),
               const SizedBox(height: 8),
               Text(
                 'Lat: ${currentPosition!.latitude.toStringAsFixed(6)}, '
                 'Lng: ${currentPosition!.longitude.toStringAsFixed(6)}',
-                style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                      color: Colors.grey[600],
-                    ),
+                style: TextStyle(color: Colors.grey[600]),
               ),
             ] else
               const Text(
-                'Location not available. Please enable location services.',
-                style: TextStyle(color: Colors.red),
-              ),
+                  'Location not available. Please enable location services.',
+                  style: TextStyle(color: Colors.red)),
           ],
         ),
       ),
@@ -422,7 +503,6 @@ class _TimeTrackingCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final isActive = activeTimeLog != null;
-
     return Card(
       margin: const EdgeInsets.only(bottom: 16),
       child: Padding(
@@ -444,12 +524,8 @@ class _TimeTrackingCard extends StatelessWidget {
                                 ),
                       ),
                       const SizedBox(height: 4),
-                      Text(
-                        schedule.serviceType,
-                        style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                              color: Colors.grey[600],
-                            ),
-                      ),
+                      Text(schedule.serviceType,
+                          style: TextStyle(color: Colors.grey[600])),
                     ],
                   ),
                 ),
@@ -462,77 +538,27 @@ class _TimeTrackingCard extends StatelessWidget {
                       borderRadius: BorderRadius.circular(20),
                       border: Border.all(color: Colors.green),
                     ),
-                    child: const Text(
-                      'ACTIVE',
-                      style: TextStyle(
-                        color: Colors.green,
-                        fontWeight: FontWeight.bold,
-                        fontSize: 12,
-                      ),
-                    ),
+                    child: const Text('ACTIVE',
+                        style: TextStyle(
+                            color: Colors.green,
+                            fontWeight: FontWeight.bold,
+                            fontSize: 12)),
                   ),
               ],
             ),
             const SizedBox(height: 12),
-            Row(
-              children: [
-                Icon(Icons.access_time, size: 16, color: Colors.grey[600]),
-                const SizedBox(width: 8),
-                Text(
-                  '${schedule.scheduledStartTime} - ${schedule.scheduledEndTime}',
-                  style: Theme.of(context).textTheme.bodyMedium,
-                ),
-              ],
-            ),
-            if (schedule.patient?.address != null) ...[
-              const SizedBox(height: 8),
-              Row(
-                children: [
-                  Icon(Icons.location_on, size: 16, color: Colors.grey[600]),
-                  const SizedBox(width: 8),
-                  Expanded(
-                    child: Text(
-                      schedule.patient!.address,
-                      style: Theme.of(context).textTheme.bodyMedium,
-                    ),
-                  ),
-                ],
-              ),
-            ],
-            if (isActive && activeTimeLog!.clockInTime != null) ...[
-              const SizedBox(height: 12),
-              Container(
-                padding: const EdgeInsets.all(12),
-                decoration: BoxDecoration(
-                  color: Colors.blue.withOpacity(0.1),
-                  borderRadius: BorderRadius.circular(8),
-                ),
-                child: Row(
-                  children: [
-                    const Icon(Icons.timer, color: Colors.blue),
-                    const SizedBox(width: 8),
-                    Text(
-                      'Started at ${DateFormat('HH:mm').format(activeTimeLog!.clockInTime!)}',
-                      style: TextStyle(
-                        color: Colors.blue[800],
-                        fontWeight: FontWeight.w500,
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-            ],
-            const SizedBox(height: 16),
-            SizedBox(
-              width: double.infinity,
-              child: ElevatedButton.icon(
-                onPressed: isActive ? onClockOut : onClockIn,
-                icon: Icon(isActive ? Icons.logout : Icons.login),
-                label: Text(isActive ? 'Clock Out' : 'Clock In'),
-                style: ElevatedButton.styleFrom(
-                  backgroundColor: isActive ? Colors.red : Colors.green,
-                  foregroundColor: Colors.white,
-                ),
+            Text(
+                '${schedule.scheduledStartTime} - ${schedule.scheduledEndTime}'),
+            if (schedule.patient?.address != null)
+              Text(schedule.patient!.address),
+            const SizedBox(height: 12),
+            ElevatedButton.icon(
+              onPressed: isActive ? onClockOut : onClockIn,
+              icon: Icon(isActive ? Icons.logout : Icons.login),
+              label: Text(isActive ? 'Clock Out' : 'Clock In'),
+              style: ElevatedButton.styleFrom(
+                backgroundColor: isActive ? Colors.red : Colors.green,
+                foregroundColor: Colors.white,
               ),
             ),
           ],
@@ -544,7 +570,6 @@ class _TimeTrackingCard extends StatelessWidget {
 
 class _TimeLogCard extends StatelessWidget {
   final TimeLog timeLog;
-
   const _TimeLogCard({required this.timeLog});
 
   @override
@@ -552,20 +577,13 @@ class _TimeLogCard extends StatelessWidget {
     return Card(
       margin: const EdgeInsets.only(bottom: 8),
       child: ListTile(
-        leading: CircleAvatar(
-          backgroundColor: timeLog.clockOutTime != null
-              ? Colors.green.withOpacity(0.2)
-              : Colors.orange.withOpacity(0.2),
-          child: Icon(
-            timeLog.clockOutTime != null ? Icons.check : Icons.timer,
-            color: timeLog.clockOutTime != null ? Colors.green : Colors.orange,
-          ),
+        leading: Icon(
+          timeLog.clockOutTime != null ? Icons.check_circle : Icons.timer,
+          color: timeLog.clockOutTime != null ? Colors.green : Colors.orange,
         ),
-        title: Text(
-          timeLog.clockInTime != null
-              ? DateFormat('MMM dd, HH:mm').format(timeLog.clockInTime!)
-              : 'No clock in time',
-        ),
+        title: Text(timeLog.clockInTime != null
+            ? DateFormat('MMM dd, HH:mm').format(timeLog.clockInTime!)
+            : 'No clock in time'),
         subtitle: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
@@ -577,9 +595,6 @@ class _TimeLogCard extends StatelessWidget {
               Text('Total: ${timeLog.totalHours!.toStringAsFixed(2)} hours'),
           ],
         ),
-        trailing: timeLog.clockOutTime != null
-            ? const Icon(Icons.check_circle, color: Colors.green)
-            : const Icon(Icons.timer, color: Colors.orange),
       ),
     );
   }
