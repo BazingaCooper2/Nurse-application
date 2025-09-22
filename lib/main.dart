@@ -6,8 +6,14 @@ import 'package:geolocator/geolocator.dart';
 import 'package:provider/provider.dart';
 import 'providers/theme_provider.dart';
 
+import 'package:firebase_core/firebase_core.dart';
+import 'package:firebase_messaging/firebase_messaging.dart';
+
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
+
+  // Initialize Firebase
+  await Firebase.initializeApp();
 
   // --- Initialize Supabase ---
   await Supabase.initialize(
@@ -18,6 +24,9 @@ Future<void> main() async {
 
   // --- Initialize local notifications ---
   await initLocalNotifs();
+
+  // Request permission and get FCM token
+  await requestPermissionAndGetToken();
 
   runApp(
     ChangeNotifierProvider(
@@ -58,6 +67,23 @@ Future<void> initLocalNotifs() async {
       ?.requestPermissions(alert: true, badge: true, sound: true);
 }
 
+Future<void> requestPermissionAndGetToken() async {
+  FirebaseMessaging messaging = FirebaseMessaging.instance;
+
+  NotificationSettings settings = await messaging.requestPermission(
+    alert: true,
+    badge: true,
+    sound: true,
+  );
+
+  if (settings.authorizationStatus == AuthorizationStatus.authorized) {
+    String? token = await messaging.getToken();
+    print('FCM Token: $token');
+  } else {
+    print('User declined or has not accepted permission');
+  }
+}
+
 class MyApp extends StatelessWidget {
   const MyApp({super.key});
 
@@ -71,6 +97,8 @@ class MyApp extends StatelessWidget {
       darkTheme: themeProvider.darkTheme,
       themeMode: themeProvider.isDarkMode ? ThemeMode.dark : ThemeMode.light,
       home: const SplashPage(),
+      // Temporarily set home to TokenDisplayPage to show the FCM token UI
+      // home: const TokenDisplayPage(),
     );
   }
 }
