@@ -1,4 +1,4 @@
-# 🏥 Nurse Tracking App
+# 🏥 Gerri's Assistance
 
 A comprehensive Flutter application designed for hospitals to track and manage home care nurses. This app provides real-time GPS tracking, scheduling management, and employee information systems to ensure efficient healthcare delivery.
 
