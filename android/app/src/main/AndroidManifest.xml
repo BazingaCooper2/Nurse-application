@@ -32,7 +32,7 @@
 
         <!-- ✅ Make sure this points to your actual MainActivity -->
         <activity
-        android:name="com.example.flutter_application_2.MainActivity"
+        android:name="com.nursetracker.app.MainActivity"
             android:exported="true"
             android:launchMode="singleTop"
             android:theme="@style/LaunchTheme"
