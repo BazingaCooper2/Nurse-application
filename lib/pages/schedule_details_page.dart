@@ -1,7 +1,7 @@
 import 'dart:async';
-
 import 'package:flutter/material.dart';
-import 'package:google_maps_flutter/google_maps_flutter.dart';
+import 'package:flutter_map/flutter_map.dart';
+import 'package:latlong2/latlong.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:intl/intl.dart';
 import '../models/schedule.dart';
@@ -16,16 +16,15 @@ class ScheduleDetailsPage extends StatefulWidget {
 }
 
 class _ScheduleDetailsPageState extends State<ScheduleDetailsPage> {
-  GoogleMapController? _mapController;
   LatLng? _nurseLocation;
+  StreamSubscription<Position>? _positionStream;
+  final MapController _mapController = MapController();
 
   @override
   void initState() {
     super.initState();
     _getNurseLocation();
   }
-
-  StreamSubscription<Position>? _positionStream;
 
   @override
   void dispose() {
@@ -35,14 +34,13 @@ class _ScheduleDetailsPageState extends State<ScheduleDetailsPage> {
 
   Future<void> _getNurseLocation() async {
     try {
-      // Check if location services are enabled
       bool serviceEnabled = await Geolocator.isLocationServiceEnabled();
       if (!serviceEnabled) {
-        // Location services are not enabled, show a message or prompt
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
             const SnackBar(
-              content: Text('Location services are disabled. Please enable them to show your location on the map.'),
+              content: Text(
+                  'Location services are disabled. Please enable them to show your location on the map.'),
               backgroundColor: Colors.orange,
             ),
           );
@@ -50,7 +48,6 @@ class _ScheduleDetailsPageState extends State<ScheduleDetailsPage> {
         return;
       }
 
-      // Check and request permissions
       LocationPermission permission = await Geolocator.checkPermission();
       if (permission == LocationPermission.denied) {
         permission = await Geolocator.requestPermission();
@@ -58,7 +55,8 @@ class _ScheduleDetailsPageState extends State<ScheduleDetailsPage> {
           if (mounted) {
             ScaffoldMessenger.of(context).showSnackBar(
               const SnackBar(
-                content: Text('Location permission denied. Please grant permission to show your location.'),
+                content: Text(
+                    'Location permission denied. Please grant permission to show your location.'),
                 backgroundColor: Colors.red,
               ),
             );
@@ -71,7 +69,8 @@ class _ScheduleDetailsPageState extends State<ScheduleDetailsPage> {
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
             const SnackBar(
-              content: Text('Location permission permanently denied. Please enable it in app settings.'),
+              content: Text(
+                  'Location permission permanently denied. Please enable it in app settings.'),
               backgroundColor: Colors.red,
             ),
           );
@@ -79,7 +78,7 @@ class _ScheduleDetailsPageState extends State<ScheduleDetailsPage> {
         return;
       }
 
-      // Get current position initially
+      // Current position
       final pos = await Geolocator.getCurrentPosition(
         desiredAccuracy: LocationAccuracy.high,
       );
@@ -87,12 +86,12 @@ class _ScheduleDetailsPageState extends State<ScheduleDetailsPage> {
         _nurseLocation = LatLng(pos.latitude, pos.longitude);
       });
 
-      // Set up live location stream
+      // Live updates
       _positionStream?.cancel();
       _positionStream = Geolocator.getPositionStream(
         locationSettings: const LocationSettings(
           accuracy: LocationAccuracy.high,
-          distanceFilter: 10, // Update every 10 meters
+          distanceFilter: 10,
         ),
       ).listen((Position position) {
         if (mounted) {
@@ -122,101 +121,108 @@ class _ScheduleDetailsPageState extends State<ScheduleDetailsPage> {
         title: const Text('Schedule Details'),
       ),
       body: SingleChildScrollView(
-            child: Column(
-              children: [
-                // Google Map
-                if (patient?.latitude != null && patient?.longitude != null)
-                  SizedBox(
-                    height: 250,
-                    child: GoogleMap(
-                      initialCameraPosition: CameraPosition(
-                        target: LatLng(
-                          patient!.latitude!,
-                          patient.longitude!,
-                        ),
-                        zoom: 14,
-                      ),
-                      markers: {
+        child: Column(
+          children: [
+            if (patient?.latitude != null && patient?.longitude != null)
+              SizedBox(
+                height: 250,
+                child: FlutterMap(
+                  mapController: _mapController,
+                  options: MapOptions(
+                    initialCenter:
+                        LatLng(patient!.latitude!, patient.longitude!),
+                    initialZoom: 14,
+                  ),
+                  children: [
+                    TileLayer(
+                      urlTemplate:
+                          "https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png",
+                      subdomains: const ['a', 'b', 'c'],
+                    ),
+                    MarkerLayer(
+                      markers: [
+                        // Patient marker
                         Marker(
-                          markerId: const MarkerId("patient"),
-                          position: LatLng(patient.latitude!, patient.longitude!),
-                          infoWindow: InfoWindow(title: patient.fullName),
+                          point: LatLng(patient.latitude!, patient.longitude!),
+                          child: const Icon(Icons.location_pin,
+                              color: Colors.red, size: 40),
                         ),
+                        // Nurse marker
                         if (_nurseLocation != null)
                           Marker(
-                            markerId: const MarkerId("nurse"),
-                            position: _nurseLocation!,
-                            icon: BitmapDescriptor.defaultMarkerWithHue(
-                                BitmapDescriptor.hueBlue),
-                            infoWindow: const InfoWindow(title: "You (Nurse)"),
+                            point: _nurseLocation!,
+                            child: const Icon(Icons.person_pin_circle,
+                                color: Colors.blue, size: 40),
                           ),
-                      },
-                      onMapCreated: (controller) => _mapController = controller,
+                      ],
+                    ),
+                  ],
+                ),
+              ),
+            Padding(
+              padding: const EdgeInsets.all(16.0),
+              child: Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Expanded(
+                    child: Card(
+                      elevation: 4,
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                      child: Padding(
+                        padding: const EdgeInsets.all(16.0),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text("📋 Appointment Details",
+                                style: Theme.of(context).textTheme.titleLarge),
+                            const SizedBox(height: 8),
+                            Text("Service: ${widget.schedule.serviceType}"),
+                            Text("Status: ${widget.schedule.status}"),
+                            Text(
+                              "Date: ${DateFormat('MMM dd, yyyy').format(widget.schedule.scheduledDate)}",
+                            ),
+                            Text(
+                              "Time: ${widget.schedule.scheduledStartTime} - ${widget.schedule.scheduledEndTime}",
+                            ),
+                          ],
+                        ),
+                      ),
                     ),
                   ),
-                Padding(
-                  padding: const EdgeInsets.all(16.0),
-                  child: Row(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Expanded(
-                        child: Card(
-                          elevation: 4,
-                          shape: RoundedRectangleBorder(
-                            borderRadius: BorderRadius.circular(12),
-                          ),
-                          child: Padding(
-                            padding: const EdgeInsets.all(16.0),
-                            child: Column(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: [
-                                Text("📋 Appointment Details",
-                                    style: Theme.of(context).textTheme.titleLarge),
-                                const SizedBox(height: 8),
-                                Text("Service: ${widget.schedule.serviceType}"),
-                                Text("Status: ${widget.schedule.status}"),
-                                Text(
-                                  "Date: ${DateFormat('MMM dd, yyyy').format(widget.schedule.scheduledDate)}",
-                                ),
-                                Text(
-                                  "Time: ${widget.schedule.scheduledStartTime} - ${widget.schedule.scheduledEndTime}",
-                                ),
-                              ],
-                            ),
-                          ),
+                  const SizedBox(width: 16),
+                  Expanded(
+                    child: Card(
+                      elevation: 4,
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                      child: Padding(
+                        padding: const EdgeInsets.all(16.0),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text("👤 Patient Information",
+                                style: Theme.of(context).textTheme.titleLarge),
+                            const SizedBox(height: 8),
+                            Text("Name: ${patient?.fullName ?? 'Unknown'}"),
+                            Text(
+                                "Address: ${patient?.address ?? 'Not available'}"),
+                            Text("Phone: ${patient?.phone ?? 'Not provided'}"),
+                            if (patient?.medicalNotes != null &&
+                                patient!.medicalNotes!.isNotEmpty)
+                              Text("Notes: ${patient.medicalNotes}"),
+                          ],
                         ),
                       ),
-                      const SizedBox(width: 16),
-                      Expanded(
-                        child: Card(
-                          elevation: 4,
-                          shape: RoundedRectangleBorder(
-                            borderRadius: BorderRadius.circular(12),
-                          ),
-                          child: Padding(
-                            padding: const EdgeInsets.all(16.0),
-                            child: Column(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: [
-                                Text("👤 Patient Information",
-                                    style: Theme.of(context).textTheme.titleLarge),
-                                const SizedBox(height: 8),
-                                Text("Name: ${patient?.fullName ?? 'Unknown'}"),
-                                Text("Address: ${patient?.address ?? 'Not available'}"),
-                                Text("Phone: ${patient?.phone ?? 'Not provided'}"),
-                                if (patient?.medicalNotes != null &&
-                                    patient!.medicalNotes!.isNotEmpty)
-                                  Text("Notes: ${patient.medicalNotes}"),
-                              ],
-                            ),
-                          ),
-                        ),
-                      ),
-                    ],
+                    ),
                   ),
-                ),
-              ],
+                ],
+              ),
             ),
+          ],
+        ),
       ),
     );
   }
