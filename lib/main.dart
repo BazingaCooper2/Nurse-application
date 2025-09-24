@@ -9,38 +9,44 @@ import 'providers/theme_provider.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
 
-Future<void> main() async {
-  WidgetsFlutterBinding.ensureInitialized();
-
-  // Initialize Firebase
-  await Firebase.initializeApp();
-
-  // --- Initialize Supabase ---
-  await Supabase.initialize(
-    url: 'https://asbfhxdomvclwsrekdxi.supabase.co',
-    anonKey:
-        'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImFzYmZoeGRvbXZjbHdzcmVrZHhpIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTQzMjI3OTUsImV4cCI6MjA2OTg5ODc5NX0.0VzbWIc-uxIDhI03g04n8HSPRQ_p01UTJQ1sg8ggigU',
-  );
-
-  // --- Initialize local notifications ---
-  await initLocalNotifs();
-
-  // Request permission and get FCM token
-  await requestPermissionAndGetToken();
-
-  runApp(
-    ChangeNotifierProvider(
-      create: (_) => ThemeProvider(),
-      child: const MyApp(),
-    ),
-  );
-}
-
+// Global Supabase client
 final supabase = Supabase.instance.client;
 
 // Global notifications plugin
 final FlutterLocalNotificationsPlugin localNotifs =
     FlutterLocalNotificationsPlugin();
+
+Future<void> main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+
+  try {
+    // ✅ Initialize Firebase first
+    await Firebase.initializeApp();
+
+    // ✅ Initialize Supabase
+    await Supabase.initialize(
+      url: 'https://asbfhxdomvclwsrekdxi.supabase.co',
+      anonKey:
+          'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImFzYmZoeGRvbXZjbHdzcmVrZHhpIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTQzMjI3OTUsImV4cCI6MjA2OTg5ODc5NX0.0VzbWIc-uxIDhI03g04n8HSPRQ_p01UTJQ1sg8ggigU',
+    );
+
+    // ✅ Initialize local notifications
+    await initLocalNotifs();
+
+    // ✅ Request FCM permissions
+    await requestPermissionAndGetToken();
+
+    runApp(
+      ChangeNotifierProvider(
+        create: (_) => ThemeProvider(),
+        child: const MyApp(),
+      ),
+    );
+  } catch (e, st) {
+    // Catch initialization errors instead of silent crash
+    debugPrint("Initialization error: $e\n$st");
+  }
+}
 
 Future<void> initLocalNotifs() async {
   const androidInit = AndroidInitializationSettings('@mipmap/ic_launcher');
@@ -49,18 +55,16 @@ Future<void> initLocalNotifs() async {
   await localNotifs.initialize(
     const InitializationSettings(android: androidInit, iOS: iosInit),
     onDidReceiveNotificationResponse: (resp) async {
-      // When user taps the notification, open device Location Settings
       await Geolocator.openLocationSettings();
     },
   );
 
-  // Android 13+ runtime notifications permission
+  // Request runtime permissions
   await localNotifs
       .resolvePlatformSpecificImplementation<
           AndroidFlutterLocalNotificationsPlugin>()
       ?.requestNotificationsPermission();
 
-  // iOS permissions
   await localNotifs
       .resolvePlatformSpecificImplementation<
           IOSFlutterLocalNotificationsPlugin>()
@@ -78,9 +82,9 @@ Future<void> requestPermissionAndGetToken() async {
 
   if (settings.authorizationStatus == AuthorizationStatus.authorized) {
     String? token = await messaging.getToken();
-    print('FCM Token: $token');
+    debugPrint('🔥 FCM Token: $token');
   } else {
-    print('User declined or has not accepted permission');
+    debugPrint('❌ User declined notifications');
   }
 }
 
@@ -97,8 +101,7 @@ class MyApp extends StatelessWidget {
       darkTheme: themeProvider.darkTheme,
       themeMode: themeProvider.isDarkMode ? ThemeMode.dark : ThemeMode.light,
       home: const SplashPage(),
-      // Temporarily set home to TokenDisplayPage to show the FCM token UI
-      // home: const TokenDisplayPage(),
+      // home: const TokenDisplayPage(), // Uncomment for debugging FCM token
     );
   }
 }

@@ -4,9 +4,8 @@ import java.io.FileInputStream
 plugins {
     id("com.android.application")
     id("kotlin-android")
-    // Flutter Gradle Plugin must be applied last
-    id("dev.flutter.flutter-gradle-plugin")
-    id("com.google.gms.google-services") // Apply google-services plugin
+    id("dev.flutter.flutter-gradle-plugin") // Flutter Gradle Plugin must be applied last
+    id("com.google.gms.google-services")    // Apply Firebase plugin
 }
 
 android {
@@ -14,7 +13,7 @@ android {
     compileSdk = 35
 
     defaultConfig {
-        applicationId = "com.nursetracker.app"
+        applicationId = "com.nursetracker.app" // Must match google-services.json
         minSdk = 23
         targetSdk = 35
         versionCode = 1
@@ -27,7 +26,6 @@ android {
         }
     }
 
-    // 🔑 Signing configuration
     signingConfigs {
         create("release") {
             val keystoreProperties = Properties()
@@ -46,7 +44,7 @@ android {
         release {
             isMinifyEnabled = true
             isShrinkResources = true
-            signingConfig = signingConfigs.getByName("release")   // ✅ link signing
+            signingConfig = signingConfigs.getByName("release")
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
@@ -62,6 +60,6 @@ android {
 dependencies {
     implementation(platform("com.google.firebase:firebase-bom:34.3.0"))
     implementation("com.google.firebase:firebase-analytics")
-    implementation("com.google.firebase:firebase-messaging") // FCM
+    implementation("com.google.firebase:firebase-messaging")
     coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.2")
 }

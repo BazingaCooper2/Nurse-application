@@ -1,13 +1,10 @@
 import 'dart:async';
-
-import 'package:flutter/foundation.dart'
-    show defaultTargetPlatform, kIsWeb, TargetPlatform;
 import 'package:flutter/material.dart';
+import 'package:flutter_map/flutter_map.dart';
+import 'package:latlong2/latlong.dart';
 import 'package:geocoding/geocoding.dart';
 import 'package:geolocator/geolocator.dart';
-import 'package:google_maps_flutter/google_maps_flutter.dart';
 import 'package:intl/intl.dart';
-import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 
 import '../main.dart';
 import '../models/employee.dart';
@@ -32,32 +29,26 @@ class _TimeTrackingPageState extends State<TimeTrackingPage> {
   String? _currentAddress;
 
   StreamSubscription<Position>? _posSub;
-  StreamSubscription<ServiceStatus>? _svcSub;
-  bool _locationServiceOn = true;
 
-  GoogleMapController? _mapController;
-
-  Set<Marker> _markers = {};
+  final MapController _mapController = MapController();
+  final Distance _distance = const Distance();
 
   @override
   void initState() {
     super.initState();
     _loadData();
-    _ensurePermissionThenTrack();
+    _startPositionStream();
   }
 
   @override
   void dispose() {
     _posSub?.cancel();
-    _svcSub?.cancel();
     super.dispose();
   }
 
   Future<void> _loadData() async {
     try {
-      setState(() {
-        _isLoading = true;
-      });
+      setState(() => _isLoading = true);
 
       final today = DateFormat('yyyy-MM-dd').format(DateTime.now());
 
@@ -100,51 +91,6 @@ class _TimeTrackingPageState extends State<TimeTrackingPage> {
     }
   }
 
-  Future<void> _showTurnOnLocationNotif() async {
-    const androidDetails = AndroidNotificationDetails(
-      'location_channel',
-      'Location Alerts',
-      importance: Importance.high,
-      priority: Priority.high,
-    );
-    const details = NotificationDetails(
-      android: androidDetails,
-      iOS: DarwinNotificationDetails(),
-    );
-
-    await localNotifs.show(
-      1001,
-      'Turn on Location',
-      'Live tracking is paused. Tap to open Location Settings.',
-      details,
-    );
-  }
-
-  void _promptTurnOnLocation() {
-    if (!mounted) return;
-    showDialog(
-      context: context,
-      builder: (_) => AlertDialog(
-        title: const Text('Turn on Location'),
-        content: const Text(
-            'Live tracking needs your device location. Please turn it on.'),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context),
-            child: const Text('Later'),
-          ),
-          ElevatedButton(
-            onPressed: () async {
-              Navigator.pop(context);
-              await Geolocator.openLocationSettings();
-            },
-            child: const Text('Open Settings'),
-          ),
-        ],
-      ),
-    );
-  }
-
   void _showSnack(String msg, {bool isError = false}) {
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
@@ -152,59 +98,8 @@ class _TimeTrackingPageState extends State<TimeTrackingPage> {
         content: Text(msg),
         backgroundColor:
             isError ? Colors.redAccent : Theme.of(context).colorScheme.primary,
-        behavior: SnackBarBehavior.floating,
       ),
     );
-  }
-
-  Future<void> _ensurePermissionThenTrack() async {
-    try {
-      if (kIsWeb) {
-        // Web only supports Position stream, no ServiceStatusStream
-        await _startPositionStream();
-        return;
-      }
-
-      final serviceEnabled = await Geolocator.isLocationServiceEnabled();
-      setState(() => _locationServiceOn = serviceEnabled);
-      if (!serviceEnabled) {
-        await _showTurnOnLocationNotif();
-        _promptTurnOnLocation();
-      }
-
-      var permission = await Geolocator.checkPermission();
-      if (permission == LocationPermission.denied) {
-        permission = await Geolocator.requestPermission();
-      }
-      if (permission == LocationPermission.deniedForever) {
-        _showSnack('Location permission permanently denied.', isError: true);
-        await Geolocator.openAppSettings();
-        return;
-      }
-      if (permission == LocationPermission.denied) {
-        _showSnack('Location permission denied.', isError: true);
-        return;
-      }
-
-      await _svcSub?.cancel();
-      if (defaultTargetPlatform == TargetPlatform.android ||
-          defaultTargetPlatform == TargetPlatform.iOS) {
-        _svcSub = Geolocator.getServiceStatusStream().listen((status) async {
-          final on = status == ServiceStatus.enabled;
-          if (mounted) setState(() => _locationServiceOn = on);
-          if (!on) {
-            await _showTurnOnLocationNotif();
-            _promptTurnOnLocation();
-          } else {
-            await localNotifs.cancel(1001);
-          }
-        });
-      }
-
-      await _startPositionStream();
-    } catch (e) {
-      _showSnack('Location error: $e', isError: true);
-    }
   }
 
   Future<void> _startPositionStream() async {
@@ -212,10 +107,11 @@ class _TimeTrackingPageState extends State<TimeTrackingPage> {
     _posSub = Geolocator.getPositionStream(
       locationSettings: const LocationSettings(
         accuracy: LocationAccuracy.best,
-        distanceFilter: 10,
+        distanceFilter: 5,
       ),
     ).listen((pos) async {
-      _currentPosition = pos;
+      setState(() => _currentPosition = pos);
+
       if (_currentAddress == null) {
         final placemarks =
             await placemarkFromCoordinates(pos.latitude, pos.longitude);
@@ -225,35 +121,32 @@ class _TimeTrackingPageState extends State<TimeTrackingPage> {
               '${p.street}, ${p.locality}, ${p.administrativeArea}';
         }
       }
-      _updateMapLocation();
-      if (mounted) setState(() {});
-    }, onError: (e) => _showSnack('Location stream error: $e', isError: true));
-  }
 
-  void _updateMapLocation() {
-    if (_currentPosition == null || _mapController == null) return;
+      // Auto clock-in (10m rule)
+      if (_todaySchedules.isNotEmpty) {
+        final patient = _todaySchedules.first.patient;
+        if (patient?.latitude != null && patient?.longitude != null) {
+          final nursePoint = LatLng(pos.latitude, pos.longitude);
+          final patientPoint = LatLng(patient!.latitude!, patient.longitude!);
 
-    final newLatLng = LatLng(_currentPosition!.latitude, _currentPosition!.longitude);
+          final dist = _distance.as(LengthUnit.Meter, nursePoint, patientPoint);
 
-    _mapController!.animateCamera(CameraUpdate.newLatLng(newLatLng));
-
-    setState(() {
-      _markers = {
-        Marker(
-          markerId: const MarkerId('currentLocation'),
-          position: newLatLng,
-          infoWindow: const InfoWindow(title: 'Your Location'),
-          icon: BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueBlue),
-        ),
-      };
+          if (dist <= 10) {
+            await _clockIn(_todaySchedules.first, auto: true);
+          }
+        }
+      }
+    }, onError: (e) {
+      _showSnack('Location stream error: $e', isError: true);
     });
   }
 
-  Future<void> _clockIn(Schedule schedule) async {
-    if (_currentPosition == null) {
-      _showSnack('Please wait for location to be detected', isError: true);
-      return;
-    }
+  Future<void> _clockIn(Schedule schedule, {bool auto = false}) async {
+    if (_currentPosition == null) return;
+
+    // Skip if already clocked in
+    if (_getActiveTimeLog(schedule.id) != null) return;
+
     try {
       await supabase.from('time_logs').insert({
         'employee_id': widget.employee.id,
@@ -263,26 +156,28 @@ class _TimeTrackingPageState extends State<TimeTrackingPage> {
         'clock_in_longitude': _currentPosition!.longitude,
         'clock_in_address': _currentAddress,
       });
+
       await supabase.from('schedules').update({
         'status': 'in_progress',
         'updated_at': DateTime.now().toIso8601String(),
       }).eq('id', schedule.id);
-      _showSnack('Clocked in successfully!');
+
+      _showSnack(auto
+          ? '✅ Auto clocked in (within 10m of patient)'
+          : '✅ Manually clocked in');
       _loadData();
-    } catch (error) {
-      _showSnack('Error clocking in: $error', isError: true);
+    } catch (e) {
+      _showSnack('Error clocking in: $e', isError: true);
     }
   }
 
   Future<void> _clockOut(TimeLog timeLog) async {
-    if (_currentPosition == null) {
-      _showSnack('Please wait for location to be detected', isError: true);
-      return;
-    }
+    if (_currentPosition == null) return;
     try {
       final clockOutTime = DateTime.now();
-      final clockInTime = timeLog.clockInTime!;
-      final totalHours = clockOutTime.difference(clockInTime).inMinutes / 60.0;
+      final totalHours = timeLog.clockInTime != null
+          ? clockOutTime.difference(timeLog.clockInTime!).inMinutes / 60.0
+          : null;
 
       await supabase.from('time_logs').update({
         'clock_out_time': clockOutTime.toIso8601String(),
@@ -298,35 +193,30 @@ class _TimeTrackingPageState extends State<TimeTrackingPage> {
         'updated_at': DateTime.now().toIso8601String(),
       }).eq('id', timeLog.scheduleId);
 
-      _showSnack('Clocked out successfully!');
+      _showSnack('✅ Clocked out successfully');
       _loadData();
-    } catch (error) {
-      _showSnack('Error clocking out: $error', isError: true);
+    } catch (e) {
+      _showSnack('Error clocking out: $e', isError: true);
     }
   }
 
   TimeLog? _getActiveTimeLog(String scheduleId) {
-    return _timeLogs
-            .firstWhere(
-              (log) => log.scheduleId == scheduleId && log.clockOutTime == null,
-              orElse: () => TimeLog(
-                id: '',
-                employeeId: '',
-                scheduleId: '',
-                createdAt: DateTime.now(),
-                updatedAt: DateTime.now(),
-              ),
-            )
-            .id
-            .isEmpty
-        ? null
-        : _timeLogs.firstWhere(
-            (log) => log.scheduleId == scheduleId && log.clockOutTime == null,
-          );
+    try {
+      return _timeLogs.firstWhere(
+        (log) => log.scheduleId == scheduleId && log.clockOutTime == null,
+      );
+    } catch (_) {
+      return null;
+    }
   }
 
   @override
   Widget build(BuildContext context) {
+    final patient =
+        _todaySchedules.isNotEmpty ? _todaySchedules.first.patient : null;
+    final schedule = _todaySchedules.isNotEmpty ? _todaySchedules.first : null;
+    final activeLog = schedule != null ? _getActiveTimeLog(schedule.id) : null;
+
     return Scaffold(
       appBar: AppBar(
         title: const Text('Time Tracking'),
@@ -335,267 +225,110 @@ class _TimeTrackingPageState extends State<TimeTrackingPage> {
             icon: const Icon(Icons.refresh),
             onPressed: () {
               _loadData();
-              _ensurePermissionThenTrack();
+              _startPositionStream();
             },
           ),
         ],
       ),
       body: _isLoading
           ? const Center(child: CircularProgressIndicator())
-          : SingleChildScrollView(
-              padding: const EdgeInsets.all(16),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  if (!_locationServiceOn && !kIsWeb)
-                    Container(
-                      width: double.infinity,
-                      margin: const EdgeInsets.only(bottom: 12),
-                      padding: const EdgeInsets.all(12),
-                      decoration: BoxDecoration(
-                        color: Colors.red.withOpacity(0.08),
-                        borderRadius: BorderRadius.circular(8),
-                        border: Border.all(color: Colors.redAccent),
-                      ),
-                      child: Row(
-                        children: [
-                          const Icon(Icons.location_off,
-                              color: Colors.redAccent),
-                          const SizedBox(width: 8),
-                          const Expanded(
-                            child: Text(
-                                'Location is OFF. Turn it on for live tracking.'),
-                          ),
-                          TextButton(
-                            onPressed: () => Geolocator.openLocationSettings(),
-                            child: const Text('Turn on'),
-                          ),
-                        ],
-                      ),
-                    ),
-                  _LocationCard(
-                    currentPosition: _currentPosition,
-                    currentAddress: _currentAddress,
-                  ),
-                  const SizedBox(height: 16),
-                  if (_currentPosition != null)
-                    SizedBox(
-                      height: 300,
-                      child: GoogleMap(
-                        initialCameraPosition: CameraPosition(
-                          target: LatLng(
-                            _currentPosition!.latitude,
-                            _currentPosition!.longitude,
-                          ),
-                          zoom: 15,
-                        ),
-                        markers: _markers,
-                        onMapCreated: (controller) => _mapController = controller,
-                      ),
-                    ),
-                  const SizedBox(height: 24),
-                  Text(
-                    'Today\'s Appointments',
-                    style: Theme.of(context).textTheme.headlineSmall?.copyWith(
-                          fontWeight: FontWeight.bold,
-                        ),
-                  ),
-                  const SizedBox(height: 16),
-                  if (_todaySchedules.isEmpty)
-                    const Center(
-                        child: Text('No appointments scheduled for today'))
-                  else
-                    ..._todaySchedules.map((schedule) {
-                      final activeTimeLog = _getActiveTimeLog(schedule.id);
-                      return _TimeTrackingCard(
-                        schedule: schedule,
-                        activeTimeLog: activeTimeLog,
-                        onClockIn: () => _clockIn(schedule),
-                        onClockOut: activeTimeLog != null
-                            ? () => _clockOut(activeTimeLog)
-                            : null,
-                      );
-                    }),
-                  const SizedBox(height: 24),
-                  Text(
-                    'Recent Time Logs',
-                    style: Theme.of(context).textTheme.headlineSmall?.copyWith(
-                          fontWeight: FontWeight.bold,
-                        ),
-                  ),
-                  const SizedBox(height: 16),
-                  if (_timeLogs.isEmpty)
-                    const Center(child: Text('No time logs found'))
-                  else
-                    ..._timeLogs
-                        .take(5)
-                        .map((timeLog) => _TimeLogCard(timeLog: timeLog)),
-                ],
-              ),
-            ),
-    );
-  }
-}
-
-class _LocationCard extends StatelessWidget {
-  final Position? currentPosition;
-  final String? currentAddress;
-
-  const _LocationCard({
-    required this.currentPosition,
-    required this.currentAddress,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return Card(
-      child: Padding(
-        padding: const EdgeInsets.all(16),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(
+          : Column(
               children: [
-                Icon(Icons.location_on,
-                    color: currentPosition != null ? Colors.green : Colors.red),
-                const SizedBox(width: 8),
-                Text(
-                  'Current Location',
-                  style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                        fontWeight: FontWeight.bold,
+                if (_currentPosition != null)
+                  Expanded(
+                    child: FlutterMap(
+                      mapController: _mapController,
+                      options: MapOptions(
+                        initialCenter: LatLng(
+                          _currentPosition!.latitude,
+                          _currentPosition!.longitude,
+                        ),
+                        initialZoom: 15,
                       ),
-                ),
-              ],
-            ),
-            const SizedBox(height: 12),
-            if (currentPosition != null) ...[
-              Text(currentAddress ?? 'Address not available'),
-              const SizedBox(height: 8),
-              Text(
-                'Lat: ${currentPosition!.latitude.toStringAsFixed(6)}, '
-                'Lng: ${currentPosition!.longitude.toStringAsFixed(6)}',
-                style: TextStyle(color: Colors.grey[600]),
-              ),
-            ] else
-              const Text(
-                  'Location not available. Please enable location services.',
-                  style: TextStyle(color: Colors.red)),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-class _TimeTrackingCard extends StatelessWidget {
-  final Schedule schedule;
-  final TimeLog? activeTimeLog;
-  final VoidCallback onClockIn;
-  final VoidCallback? onClockOut;
-
-  const _TimeTrackingCard({
-    required this.schedule,
-    required this.activeTimeLog,
-    required this.onClockIn,
-    required this.onClockOut,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    final isActive = activeTimeLog != null;
-    return Card(
-      margin: const EdgeInsets.only(bottom: 16),
-      child: Padding(
-        padding: const EdgeInsets.all(16),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(
-              children: [
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        schedule.patient?.fullName ?? 'Unknown Patient',
-                        style:
-                            Theme.of(context).textTheme.titleMedium?.copyWith(
-                                  fontWeight: FontWeight.bold,
+                      children: [
+                        TileLayer(
+                          urlTemplate:
+                              "https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png",
+                          subdomains: const ['a', 'b', 'c'],
+                        ),
+                        MarkerLayer(
+                          markers: [
+                            Marker(
+                              point: LatLng(
+                                _currentPosition!.latitude,
+                                _currentPosition!.longitude,
+                              ),
+                              child: const Icon(Icons.person_pin_circle,
+                                  color: Colors.blue, size: 40),
+                            ),
+                            if (patient?.latitude != null &&
+                                patient?.longitude != null)
+                              Marker(
+                                point: LatLng(
+                                  patient!.latitude!,
+                                  patient.longitude!,
                                 ),
-                      ),
-                      const SizedBox(height: 4),
-                      Text(schedule.serviceType,
-                          style: TextStyle(color: Colors.grey[600])),
-                    ],
-                  ),
-                ),
-                if (isActive)
-                  Container(
-                    padding:
-                        const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-                    decoration: BoxDecoration(
-                      color: Colors.green.withOpacity(0.1),
-                      borderRadius: BorderRadius.circular(20),
-                      border: Border.all(color: Colors.green),
+                                child: const Icon(Icons.location_pin,
+                                    color: Colors.red, size: 40),
+                              ),
+                          ],
+                        ),
+                        if (_currentPosition != null &&
+                            patient?.latitude != null &&
+                            patient?.longitude != null)
+                          PolylineLayer(
+                            polylines: [
+                              Polyline(
+                                points: [
+                                  LatLng(_currentPosition!.latitude,
+                                      _currentPosition!.longitude),
+                                  LatLng(
+                                      patient!.latitude!, patient.longitude!),
+                                ],
+                                strokeWidth: 4,
+                                color: Colors.green,
+                              )
+                            ],
+                          ),
+                      ],
                     ),
-                    child: const Text('ACTIVE',
-                        style: TextStyle(
-                            color: Colors.green,
-                            fontWeight: FontWeight.bold,
-                            fontSize: 12)),
+                  )
+                else
+                  const Center(
+                    child: Padding(
+                      padding: EdgeInsets.all(20),
+                      child: Text("Waiting for location..."),
+                    ),
+                  ),
+
+                // Manual buttons
+                if (schedule != null)
+                  Padding(
+                    padding: const EdgeInsets.all(16.0),
+                    child: activeLog == null
+                        ? ElevatedButton.icon(
+                            onPressed: () => _clockIn(schedule),
+                            icon: const Icon(Icons.login),
+                            label: const Text("Clock In Manually"),
+                            style: ElevatedButton.styleFrom(
+                              backgroundColor: Colors.green,
+                              foregroundColor: Colors.white,
+                              minimumSize: const Size(double.infinity, 50),
+                            ),
+                          )
+                        : ElevatedButton.icon(
+                            onPressed: () => _clockOut(activeLog),
+                            icon: const Icon(Icons.logout),
+                            label: const Text("Clock Out"),
+                            style: ElevatedButton.styleFrom(
+                              backgroundColor: Colors.red,
+                              foregroundColor: Colors.white,
+                              minimumSize: const Size(double.infinity, 50),
+                            ),
+                          ),
                   ),
               ],
             ),
-            const SizedBox(height: 12),
-            Text(
-                '${schedule.scheduledStartTime} - ${schedule.scheduledEndTime}'),
-            if (schedule.patient?.address != null)
-              Text(schedule.patient!.address),
-            const SizedBox(height: 12),
-            ElevatedButton.icon(
-              onPressed: isActive ? onClockOut : onClockIn,
-              icon: Icon(isActive ? Icons.logout : Icons.login),
-              label: Text(isActive ? 'Clock Out' : 'Clock In'),
-              style: ElevatedButton.styleFrom(
-                backgroundColor: isActive ? Colors.red : Colors.green,
-                foregroundColor: Colors.white,
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-class _TimeLogCard extends StatelessWidget {
-  final TimeLog timeLog;
-  const _TimeLogCard({required this.timeLog});
-
-  @override
-  Widget build(BuildContext context) {
-    return Card(
-      margin: const EdgeInsets.only(bottom: 8),
-      child: ListTile(
-        leading: Icon(
-          timeLog.clockOutTime != null ? Icons.check_circle : Icons.timer,
-          color: timeLog.clockOutTime != null ? Colors.green : Colors.orange,
-        ),
-        title: Text(timeLog.clockInTime != null
-            ? DateFormat('MMM dd, HH:mm').format(timeLog.clockInTime!)
-            : 'No clock in time'),
-        subtitle: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            if (timeLog.clockOutTime != null)
-              Text('Out: ${DateFormat('HH:mm').format(timeLog.clockOutTime!)}')
-            else
-              const Text('Still active'),
-            if (timeLog.totalHours != null)
-              Text('Total: ${timeLog.totalHours!.toStringAsFixed(2)} hours'),
-          ],
-        ),
-      ),
     );
   }
 }
