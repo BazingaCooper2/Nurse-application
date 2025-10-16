@@ -44,6 +44,18 @@ class _TimeTrackingPageState extends State<TimeTrackingPage> {
     _requestPermission();
   }
 
+  // ✅ Added method to move camera to user's current position
+  Future<void> _moveCameraToUser() async {
+    if (_currentPosition != null && _mapController != null) {
+      _mapController!.animateCamera(
+        CameraUpdate.newLatLngZoom(
+          LatLng(_currentPosition!.latitude, _currentPosition!.longitude),
+          15,
+        ),
+      );
+    }
+  }
+
   Future<void> _requestPermission() async {
     var status = await Permission.location.request();
     if (status.isGranted) {
@@ -164,6 +176,9 @@ class _TimeTrackingPageState extends State<TimeTrackingPage> {
 
       // Update markers and polylines
       _updateMarkersAndPolylines();
+
+      // ✅ Added: move camera to current location
+      _moveCameraToUser();
     }, onError: (e) {
       _showSnack('Location stream error: $e', isError: true);
     });
